@@ -2,6 +2,89 @@ from flask import Flask, request, jsonify, render_template_string
 import json
 from datetime import datetime
 import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import os
+
+# Database connection
+def get_db_connection():
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    if DATABASE_URL:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        return conn
+    return None
+
+def init_database():
+    """Vytvoří tabulku při prvním spuštění"""
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS meteo_data (
+                    id SERIAL PRIMARY KEY,
+                    wsid VARCHAR(50),
+                    datetime VARCHAR(50),
+                    received_at TIMESTAMP,
+                    relative_pressure FLOAT,
+                    absolute_pressure FLOAT,
+                    indoor_temp FLOAT,
+                    indoor_humidity INTEGER,
+                    console_battery INTEGER,
+                    outdoor_temp FLOAT,
+                    outdoor_humidity INTEGER,
+                    feels_like FLOAT,
+                    wind_chill FLOAT,
+                    heat_index FLOAT,
+                    dew_point FLOAT,
+                    wind_direction INTEGER,
+                    wind_speed FLOAT,
+                    wind_speed_10min_avg FLOAT,
+                    wind_gust FLOAT,
+                    rain_rate FLOAT,
+                    rain_hourly FLOAT,
+                    rain_daily FLOAT,
+                    rain_weekly FLOAT,
+                    rain_monthly FLOAT,
+                    rain_yearly FLOAT,
+                    uv_index FLOAT,
+                    solar_radiation FLOAT,
+                    wbgt_temp FLOAT,
+                    outdoor_battery INTEGER,
+                    outdoor_connection INTEGER,
+                    lightning_last_strike_time INTEGER,
+                    lightning_distance_km INTEGER,
+                    lightning_strikes_1hour INTEGER,
+                    lightning_count_5min INTEGER,
+                    lightning_count_30min INTEGER,
+                    lightning_count_1hour INTEGER,
+                    lightning_count_1day INTEGER,
+                    lightning_battery INTEGER,
+                    lightning_connection INTEGER,
+                    ch1_temp FLOAT,
+                    ch1_humidity INTEGER,
+                    ch1_battery INTEGER,
+                    ch1_connection INTEGER,
+                    ch1_type INTEGER,
+                    ch2_temp FLOAT,
+                    ch2_humidity INTEGER,
+                    ch2_battery INTEGER,
+                    ch2_connection INTEGER,
+                    ch2_type INTEGER,
+                    soil_temp FLOAT,
+                    soil_humidity INTEGER,
+                    soil_battery INTEGER,
+                    soil_connection INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            cur.close()
+            print("✅ Database table created/verified")
+        except Exception as e:
+            print(f"❌ Database error: {e}")
+        finally:
+            conn.close()
 
 app = Flask(__name__)
 
@@ -9,7 +92,27 @@ app = Flask(__name__)
 DATA_FILE = 'meteo_data.json'
 
 def load_data():
-    """Načte uložená data ze souboru"""
+    """Načte data z databáze"""
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM meteo_data ORDER BY created_at DESC LIMIT 1000")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            # Převedení na seznam slovníků
+            data = []
+            for row in rows:
+                data.append(dict(row))
+            
+            return list(reversed(data))  # Nejstarší první
+        except Exception as e:
+            print(f"❌ Error loading data: {e}")
+            conn.close()
+    
+    # Fallback na JSON soubor
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -18,13 +121,45 @@ def load_data():
             return []
     return []
 
+def save_data_to_db(weather_data):
+    """Uloží data do databáze"""
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            
+            # Připravení dat pro insert
+            columns = list(weather_data.keys())
+            values = list(weather_data.values())
+            
+            # SQL pro insert
+            sql = f"""
+                INSERT INTO meteo_data ({', '.join(columns)}) 
+                VALUES ({', '.join(['%s'] * len(values))})
+            """
+            
+            cur.execute(sql, values)
+            conn.commit()
+            cur.close()
+            conn.close()
+            print("✅ Data saved to database")
+            return True
+        except Exception as e:
+            print(f"❌ Database save error: {e}")
+            conn.close()
+    return False
+
 def save_data(data):
-    """Uloží data do souboru"""
-    try:
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Chyba při ukládání dat: {e}")
+    """Zachová kompatibilitu - uloží poslední záznam"""
+    if data and len(data) > 0:
+        latest_data = data[-1]
+        if not save_data_to_db(latest_data):
+            # Fallback na JSON
+            try:
+                with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                print(f"❌ JSON save error: {e}")
 
 @app.route('/data/upload.php', methods=['GET'])
 def receive_weather_data():
@@ -113,14 +248,7 @@ def receive_weather_data():
                 weather_data['soil_connection'] = request.args.get(cn_key, type=int)
     
     # Uložení dat
-    all_data = load_data()
-    all_data.append(weather_data)
-    
-    # Ponechej pouze posledních 1000 záznamů
-    if len(all_data) > 1000:
-        all_data = all_data[-1000:]
-    
-    save_data(all_data)
+save_data_to_db(weather_data)
     
     print(f"Přijata data v {datetime.now()}: Lightning: {weather_data.get('lightning_connection', 'N/A')}, Soil: {weather_data.get('soil_temp', 'N/A')}°C")
     
@@ -923,6 +1051,9 @@ def get_latest():
     if data:
         return jsonify(data[-1])
     return jsonify({})
+
+# Inicializace databáze při startu
+init_database()
 
 if __name__ == '__main__':
     print("🌤️ Spouštím meteostanice server...")
