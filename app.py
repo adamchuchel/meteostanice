@@ -933,4 +933,4 @@ if __name__ == '__main__':
     print("Stiskni Ctrl+C pro ukončení serveru.")
     
     # Spuštění serveru na všech rozhraních
-    app.run(host='0.0.0.0', port=8000, debug=True, ssl_context='adhoc')
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
